@@ -21,3 +21,6 @@ credentials*
 
 # Logs
 *.log
+
+# Release artifacts
+*.zip
