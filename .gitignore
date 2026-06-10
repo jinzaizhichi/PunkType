@@ -1,0 +1,23 @@
+# Build artifacts
+.build
+DerivedData
+*.app
+*.dSYM
+
+# Xcode
+xcuserdata
+*.xcworkspace
+*.xcuserstate
+
+# macOS
+.DS_Store
+
+# Secrets / local env — never commit
+.env
+*.env
+secrets*
+*.secret
+credentials*
+
+# Logs
+*.log

@@ -1,0 +1,525 @@
+import SwiftUI
+import ServiceManagement
+
+// MARK: - Settings View
+
+struct SettingsView: View {
+    @EnvironmentObject var appDelegate: AppDelegate
+    @ObservedObject var settings = Settings.shared
+    @ObservedObject var historyManager = HistoryManager.shared
+    @ObservedObject var dictionary = DictionaryStore.shared
+
+    @State private var showApiKey = false
+    @State private var showOpenAIKey = false
+    @State private var testResult: String?
+    @State private var isTesting = false
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+
+    var body: some View {
+        TabView {
+            generalTab
+                .tabItem { Label("通用", systemImage: "gear") }
+
+            promptTab
+                .tabItem { Label("提示词", systemImage: "text.quote") }
+
+            dictionaryTab
+                .tabItem { Label("词典", systemImage: "character.book.closed") }
+
+            historyTab
+                .tabItem { Label("历史", systemImage: "clock.arrow.circlepath") }
+
+            aboutTab
+                .tabItem { Label("关于", systemImage: "info.circle") }
+        }
+        .frame(width: 540, height: 560)
+    }
+
+    // MARK: - 通用
+
+    private var generalTab: some View {
+        Form {
+            // 触发与启动
+            Section {
+                Picker("触发快捷键", selection: $settings.hotkey) {
+                    ForEach(Settings.hotkeyPresets, id: \.id) { preset in
+                        Text(preset.label).tag(preset.id)
+                    }
+                }
+                .onChange(of: settings.hotkey) { _, _ in
+                    appDelegate.registerHotkey()
+                }
+
+                Toggle("开机自动启动", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, enabled in
+                        do {
+                            if enabled {
+                                try SMAppService.mainApp.register()
+                            } else {
+                                try SMAppService.mainApp.unregister()
+                            }
+                        } catch {
+                            print("[PunkType] Launch at login failed: \(error)")
+                            launchAtLogin = SMAppService.mainApp.status == .enabled
+                        }
+                    }
+            } header: {
+                Text("触发")
+            } footer: {
+                Text("按一下快捷键开始录音，再按一下停止。选中文字时按快捷键会进入命令模式。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // 输出档位
+            Section {
+                Picker("输出档位", selection: $settings.tier) {
+                    ForEach(Settings.tiers, id: \.self) { tier in
+                        Text(Settings.tierLabels[tier] ?? tier).tag(tier)
+                    }
+                }
+            } header: {
+                Text("输出")
+            } footer: {
+                Text(tierFooter)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // 模型
+            Section("模型") {
+                Picker("日常润色", selection: $settings.model) {
+                    ForEach(Settings.supportedModels, id: \.self) { model in
+                        Text(Settings.modelLabels[model] ?? model).tag(model)
+                    }
+                }
+                Picker("格式 / 命令", selection: $settings.heavyModel) {
+                    ForEach(Settings.supportedModels, id: \.self) { model in
+                        Text(Settings.modelLabels[model] ?? model).tag(model)
+                    }
+                }
+            }
+
+            // 语音识别
+            Section {
+                Picker("识别引擎", selection: $settings.sttEngine) {
+                    Text("本机识别（快，离线）").tag("local")
+                    Text("Whisper 云端（准）").tag("whisper")
+                }
+                Picker("识别语言", selection: $settings.language) {
+                    ForEach(Settings.supportedLanguages, id: \.code) { lang in
+                        Text(lang.name).tag(lang.code)
+                    }
+                }
+            } header: {
+                Text("语音识别")
+            } footer: {
+                Text("格式档会自动升级为 Whisper；本机识别失败时也会自动兜底到 Whisper（需先填好下方 OpenAI 密钥）。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // DeepSeek 密钥
+            Section {
+                LabeledContent("DeepSeek 密钥") {
+                    HStack(spacing: 6) {
+                        Group {
+                            if showApiKey {
+                                TextField("sk-...", text: $settings.apiKey)
+                                    .font(.system(.body, design: .monospaced))
+                            } else {
+                                SecureField("sk-...", text: $settings.apiKey)
+                            }
+                        }
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+
+                        Button(action: { showApiKey.toggle() }) {
+                            Image(systemName: showApiKey ? "eye.slash" : "eye")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+
+                LabeledContent("连接测试") {
+                    HStack(spacing: 8) {
+                        Button(action: testApiKey) {
+                            if isTesting {
+                                ProgressView().scaleEffect(0.6).frame(width: 14, height: 14)
+                            }
+                            Text("测试")
+                        }
+                        .disabled(isTesting || !settings.isConfigured)
+
+                        if let result = testResult {
+                            Text(result)
+                                .font(.caption)
+                                .foregroundStyle(result.contains("✓") ? Color.green : Color.red)
+                        }
+                    }
+                }
+            } header: {
+                Text("DeepSeek 密钥")
+            } footer: {
+                Text("前往 platform.deepseek.com 获取密钥。润色 / 格式 / 命令档位都需要它。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // OpenAI 密钥（可选）
+            Section {
+                LabeledContent("OpenAI 密钥") {
+                    HStack(spacing: 6) {
+                        Group {
+                            if showOpenAIKey {
+                                TextField("sk-...", text: $settings.openaiKey)
+                                    .font(.system(.body, design: .monospaced))
+                            } else {
+                                SecureField("sk-...", text: $settings.openaiKey)
+                            }
+                        }
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+
+                        Button(action: { showOpenAIKey.toggle() }) {
+                            Image(systemName: showOpenAIKey ? "eye.slash" : "eye")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                TextField("转写模型", text: $settings.openaiModel)
+                    .font(.system(.caption, design: .monospaced))
+            } header: {
+                Text("OpenAI 密钥（Whisper，可选）")
+            } footer: {
+                Text("仅在使用 Whisper 云端转写时需要。默认模型 gpt-4o-mini-transcribe。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // 高级
+            Section("高级") {
+                TextField("接口地址", text: $settings.apiEndpoint)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var tierFooter: String {
+        switch settings.tier {
+        case "fast":   return "⚡ 极速：识别原文直出，不经过 AI，零等待。"
+        case "format": return "📄 格式：清理口语并自动按体裁排版（邮件 / 汇报 / 纪要 / 待办），使用更强的模型。"
+        default:        return "✨ 润色：清理语气词、结巴、语序，保留你的口语风格。"
+        }
+    }
+
+    // MARK: - 提示词
+
+    @State private var editingPrompt = "polish"
+
+    private var promptTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Picker("", selection: $editingPrompt) {
+                Text("✨ 润色").tag("polish")
+                Text("📄 格式").tag("format")
+                Text("🎯 选中命令").tag("command")
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+
+            Text(promptDescription)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            TextEditor(text: promptBinding)
+                .font(.system(.body, design: .monospaced))
+                .padding(6)
+                .frame(maxWidth: .infinity, minHeight: 300)
+                .background(Color(nsColor: .textBackgroundColor))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.secondary.opacity(0.25))
+                )
+
+            HStack {
+                Button("恢复默认") {
+                    switch editingPrompt {
+                    case "format":  settings.formatPrompt = Settings.defaultFormatPrompt
+                    case "command": settings.commandPrompt = Settings.defaultCommandPrompt
+                    default:         settings.systemPrompt = Settings.defaultPrompt
+                    }
+                }
+                .buttonStyle(.link)
+
+                Spacer()
+
+                Text("\(promptBinding.wrappedValue.count) 字")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+    }
+
+    private var promptBinding: Binding<String> {
+        switch editingPrompt {
+        case "format":  return $settings.formatPrompt
+        case "command": return $settings.commandPrompt
+        default:         return $settings.systemPrompt
+        }
+    }
+
+    private var promptDescription: String {
+        switch editingPrompt {
+        case "format":  return "格式档：清理口语并按体裁（邮件 / 汇报 / 纪要 / 待办）自动排版。"
+        case "command": return "命令模式：当宿主 App 中有选中文字时，口述指令来处理选中内容。"
+        default:         return "润色档：清理语气词、结巴、语序，保留口语风格。"
+        }
+    }
+
+    // MARK: - 词典
+
+    @State private var newTerm = ""
+    @State private var newNote = ""
+
+    private var dictionaryTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("个人词典")
+                    .font(.headline)
+                Spacer()
+                Text("\(dictionary.entries.count) / \(DictionaryStore.maxEntries)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !dictionary.entries.isEmpty {
+                    Button("清空") { dictionary.clearAll() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+
+            Toggle("启用词典（出字后自动抽词，并注入提示词纠正识别错误）", isOn: $settings.injectGlossary)
+
+            // 手动添加
+            HStack(spacing: 8) {
+                TextField("词条（术语 / 人名 / 产品名）", text: $newTerm)
+                    .textFieldStyle(.roundedBorder)
+                TextField("译法 / 备注（可选）", text: $newNote)
+                    .textFieldStyle(.roundedBorder)
+                Button("添加") {
+                    dictionary.add(term: newTerm, note: newNote)
+                    newTerm = ""
+                    newNote = ""
+                }
+                .disabled(newTerm.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+
+            if dictionary.entries.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "character.book.closed")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                    Text("词典还是空的")
+                        .foregroundStyle(.secondary)
+                    Text("每次出字后会自动提取术语、人名、产品名入库，也可以在上方手动添加。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(dictionary.entries) { entry in
+                        DictionaryRow(entry: entry, dictionary: dictionary)
+                    }
+                }
+                .listStyle(.inset(alternatesRowBackgrounds: true))
+                .frame(maxHeight: .infinity)
+            }
+        }
+        .padding(20)
+    }
+
+    // MARK: - 历史
+
+    private var historyTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("历史记录")
+                    .font(.headline)
+                Spacer()
+                Text("\(historyManager.entries.count) / 100")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !historyManager.entries.isEmpty {
+                    Button("清空") { historyManager.clearAll() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+
+            if historyManager.entries.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                    Text("还没有历史记录")
+                        .foregroundStyle(.secondary)
+                    Text("你处理过的文字会显示在这里。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(historyManager.entries) { entry in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(entry.timeAgo)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text(entry.model)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(Color.secondary.opacity(0.12))
+                                    .cornerRadius(4)
+                                Button(action: {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(entry.cleanedText, forType: .string)
+                                }) {
+                                    Image(systemName: "doc.on.doc").font(.caption)
+                                }
+                                .buttonStyle(.borderless)
+                                .help("复制")
+                                Button(action: { historyManager.remove(entry) }) {
+                                    Image(systemName: "trash").font(.caption).foregroundStyle(.red)
+                                }
+                                .buttonStyle(.borderless)
+                                .help("删除")
+                            }
+                            Text(entry.cleanedText)
+                                .font(.system(size: 12))
+                                .textSelection(.enabled)
+                                .lineLimit(4)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                .listStyle(.inset(alternatesRowBackgrounds: true))
+            }
+        }
+        .padding(20)
+    }
+
+    // MARK: - 关于
+
+    private var aboutTab: some View {
+        VStack(spacing: 14) {
+            Spacer()
+
+            Image(systemName: "waveform")
+                .font(.system(size: 44))
+                .foregroundStyle(.primary)
+
+            Text("PunkType")
+                .font(.title)
+                .fontWeight(.bold)
+
+            Text("说人话，出成品。")
+                .foregroundStyle(.secondary)
+
+            Text("版本 1.1.0")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider().padding(.vertical, 4)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("\(settings.hotkeyPreset.label) 开始 / 停止录音", systemImage: "keyboard")
+                Label("⚡极速 / ✨润色 / 📄格式 三档输出", systemImage: "slider.horizontal.3")
+                Label("选中文字 + 快捷键，口述指令处理选区", systemImage: "text.cursor")
+                Label("本机识别 + Whisper 云端兜底", systemImage: "waveform")
+                Label("个人词典自动学习，纠正识别错误", systemImage: "character.book.closed")
+                Label("光标处自动粘贴，并恢复原剪贴板", systemImage: "doc.on.clipboard")
+            }
+            .font(.callout)
+
+            Spacer()
+
+            Text("开源项目 · github.com/punk2898/PunkType")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Actions
+
+    private func testApiKey() {
+        isTesting = true
+        testResult = nil
+
+        Task {
+            do {
+                _ = try await DeepSeekService.cleanup(
+                    text: "测试连接",
+                    apiKey: settings.apiKey,
+                    model: settings.model,
+                    prompt: "回复 OK",
+                    endpoint: settings.apiEndpoint
+                )
+                await MainActor.run {
+                    testResult = "✓ 连接成功"
+                    isTesting = false
+                }
+            } catch {
+                await MainActor.run {
+                    testResult = "✗ \(error.localizedDescription)"
+                    isTesting = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 词典行（行内可编辑）
+
+private struct DictionaryRow: View {
+    @State var entry: DictionaryEntry
+    let dictionary: DictionaryStore
+
+    var body: some View {
+        HStack {
+            TextField("词条", text: $entry.term, onCommit: commit)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+
+            TextField("译法 / 备注", text: $entry.note, onCommit: commit)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+
+            Button(action: { dictionary.remove(entry) }) {
+                Image(systemName: "trash").font(.caption).foregroundStyle(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("删除")
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func commit() {
+        let trimmed = entry.term.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            dictionary.remove(entry)
+        } else {
+            dictionary.update(entry)
+        }
+    }
+}

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>PunkType</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.punk2898.punktype</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>PunkType</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>PunkType needs speech recognition to convert your voice to text.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>PunkType needs microphone access to record your voice.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>PunkType uses Apple Events to paste text into other applications.</string>
+</dict>
+</plist>
