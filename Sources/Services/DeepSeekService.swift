@@ -9,10 +9,35 @@ enum DeepSeekService {
         let messages: [Message]
         let temperature: Double
         let max_tokens: Int
+        var stream: Bool? = nil
+        var thinking: Thinking? = nil
 
         struct Message: Encodable {
             let role: String
             let content: String
+        }
+        struct Thinking: Encodable {
+            let type: String
+        }
+    }
+
+    /// DeepSeek's V4 models reason by default, which adds ~1s of "thinking"
+    /// before any visible text — wasteful for mechanical cleanup. Disable it
+    /// for DeepSeek endpoints only (other OpenAI-compatible providers ignore /
+    /// may reject the field, so we don't send it to them).
+    private static func thinkingConfig(disable: Bool, endpoint: String) -> ChatRequest.Thinking? {
+        guard disable, endpoint.lowercased().contains("deepseek") else { return nil }
+        return ChatRequest.Thinking(type: "disabled")
+    }
+
+    // Streaming SSE chunk: { choices: [ { delta: { content: "…" } } ] }
+    struct StreamChunk: Decodable {
+        let choices: [Choice]
+        struct Choice: Decodable {
+            let delta: Delta
+            struct Delta: Decodable {
+                let content: String?
+            }
         }
     }
 
@@ -38,7 +63,8 @@ enum DeepSeekService {
         endpoint: String,
         temperature: Double = 0,
         maxTokens: Int = 1024,
-        timeout: TimeInterval = 12
+        timeout: TimeInterval = 12,
+        disableThinking: Bool = false
     ) async throws -> String {
 
         guard let url = URL(string: endpoint) else {
@@ -52,7 +78,8 @@ enum DeepSeekService {
                 .init(role: "user", content: user)
             ],
             temperature: temperature,
-            max_tokens: maxTokens
+            max_tokens: maxTokens,
+            thinking: thinkingConfig(disable: disableThinking, endpoint: endpoint)
         )
 
         var urlRequest = URLRequest(url: url)
@@ -90,6 +117,73 @@ enum DeepSeekService {
         return content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Streaming variant — yields token deltas as they arrive (lower latency).
+    static func streamCleanup(
+        text: String,
+        apiKey: String,
+        model: String,
+        prompt: String,
+        endpoint: String,
+        maxTokens: Int = 1024,
+        timeout: TimeInterval = 30,
+        disableThinking: Bool = true
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    guard let url = URL(string: endpoint) else { throw URLError(.badURL) }
+
+                    let body = ChatRequest(
+                        model: model,
+                        messages: [
+                            .init(role: "system", content: prompt),
+                            .init(role: "user", content: text),
+                        ],
+                        temperature: 0,
+                        max_tokens: maxTokens,
+                        stream: true,
+                        thinking: thinkingConfig(disable: disableThinking, endpoint: endpoint)
+                    )
+
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    request.httpBody = try JSONEncoder().encode(body)
+                    request.timeoutInterval = timeout
+
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else {
+                        throw URLError(.badServerResponse)
+                    }
+                    guard http.statusCode == 200 else {
+                        throw NSError(
+                            domain: "PunkType.DeepSeek",
+                            code: http.statusCode,
+                            userInfo: [NSLocalizedDescriptionKey: "API error \(http.statusCode)"]
+                        )
+                    }
+
+                    for try await line in bytes.lines {
+                        guard line.hasPrefix("data:") else { continue }
+                        let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                        if payload == "[DONE]" { break }
+                        guard let data = payload.data(using: .utf8),
+                              let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data),
+                              let delta = chunk.choices.first?.delta.content,
+                              !delta.isEmpty else { continue }
+                        continuation.yield(delta)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     /// Send raw transcription text for cleanup / formatting
     static func cleanup(
         text: String,
@@ -98,7 +192,8 @@ enum DeepSeekService {
         prompt: String,
         endpoint: String,
         maxTokens: Int = 1024,
-        timeout: TimeInterval = 12
+        timeout: TimeInterval = 12,
+        disableThinking: Bool = true
     ) async throws -> String {
         try await chat(
             system: prompt,
@@ -107,7 +202,8 @@ enum DeepSeekService {
             model: model,
             endpoint: endpoint,
             maxTokens: maxTokens,
-            timeout: timeout
+            timeout: timeout,
+            disableThinking: disableThinking
         )
     }
 

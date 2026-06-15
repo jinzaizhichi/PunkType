@@ -20,8 +20,8 @@ struct SettingsView: View {
             generalTab
                 .tabItem { Label("通用", systemImage: "gear") }
 
-            promptTab
-                .tabItem { Label("提示词", systemImage: "text.quote") }
+            tierTab
+                .tabItem { Label("档位", systemImage: "slider.horizontal.3") }
 
             dictionaryTab
                 .tabItem { Label("词典", systemImage: "character.book.closed") }
@@ -71,9 +71,9 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            // 输出档位
+            // 输出档位（当前档；每档的引擎/模型/流式在「档位」标签里配）
             Section {
-                Picker("输出档位", selection: $settings.tier) {
+                Picker("当前档位", selection: $settings.tier) {
                     ForEach(Settings.tiers, id: \.self) { tier in
                         Text(Settings.tierLabels[tier] ?? tier).tag(tier)
                     }
@@ -81,30 +81,17 @@ struct SettingsView: View {
             } header: {
                 Text("输出")
             } footer: {
-                Text(tierFooter)
+                Text(tierFooter + "\n每一档的识别引擎、模型、流式输出、提示词都可在「档位」标签里单独自定义。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            // 模型
-            Section("模型") {
-                Picker("日常润色", selection: $settings.model) {
-                    ForEach(Settings.supportedModels, id: \.self) { model in
-                        Text(Settings.modelLabels[model] ?? model).tag(model)
-                    }
-                }
-                Picker("格式 / 命令", selection: $settings.heavyModel) {
-                    ForEach(Settings.supportedModels, id: \.self) { model in
-                        Text(Settings.modelLabels[model] ?? model).tag(model)
-                    }
-                }
-            }
-
-            // 语音识别
+            // 命令 / 翻译模型（非档位，单独配）
             Section {
-                Picker("识别引擎", selection: $settings.sttEngine) {
-                    Text("本机识别（快，离线）").tag("local")
-                    Text("Whisper 云端（准）").tag("whisper")
+                Picker("命令 / 翻译模型", selection: $settings.heavyModel) {
+                    ForEach(Settings.supportedModels, id: \.self) { model in
+                        Text(Settings.modelLabels[model] ?? model).tag(model)
+                    }
                 }
                 Picker("识别语言", selection: $settings.language) {
                     ForEach(Settings.supportedLanguages, id: \.code) { lang in
@@ -112,9 +99,9 @@ struct SettingsView: View {
                     }
                 }
             } header: {
-                Text("语音识别")
+                Text("通用")
             } footer: {
-                Text("格式档会自动升级为 Whisper；本机识别失败时也会自动兜底到 Whisper（需先填好下方 OpenAI 密钥）。")
+                Text("命令 / 翻译模型用于「选中文字命令」。识别语言对所有档位生效。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -215,66 +202,115 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - 提示词
+    // MARK: - 档位（每档：识别引擎 + 模型 + 流式 + 提示词）
 
-    @State private var editingPrompt = "polish"
+    @State private var editingTier = "polish"
 
-    private var promptTab: some View {
+    private var tierTab: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Picker("", selection: $editingPrompt) {
+            Picker("", selection: $editingTier) {
+                Text("⚡ 极速").tag("fast")
                 Text("✨ 润色").tag("polish")
                 Text("📄 格式").tag("format")
-                Text("🎯 选中命令").tag("command")
+                Text("🎯 命令").tag("command")
             }
             .labelsHidden()
             .pickerStyle(.segmented)
 
-            Text(promptDescription)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            TextEditor(text: promptBinding)
-                .font(.system(.body, design: .monospaced))
-                .padding(6)
-                .frame(maxWidth: .infinity, minHeight: 300)
-                .background(Color(nsColor: .textBackgroundColor))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.secondary.opacity(0.25))
-                )
-
-            HStack {
-                Button("恢复默认") {
-                    switch editingPrompt {
-                    case "format":  settings.formatPrompt = Settings.defaultFormatPrompt
-                    case "command": settings.commandPrompt = Settings.defaultCommandPrompt
-                    default:         settings.systemPrompt = Settings.defaultPrompt
+            Form {
+                if editingTier != "command" {
+                    Section("识别") {
+                        Picker("识别引擎", selection: sttBinding) {
+                            Text("本机识别（稳定，离线）").tag("local")
+                            if #available(macOS 26.0, *) {
+                                Text("Apple 快速识别（macOS 26，更快）").tag("apple-fast")
+                            }
+                            Text("Whisper 云端（更准，需 OpenAI Key）").tag("whisper")
+                        }
                     }
                 }
-                .buttonStyle(.link)
 
-                Spacer()
+                if editingTier == "polish" || editingTier == "format" {
+                    Section("加工") {
+                        Picker("AI 模型", selection: modelBinding) {
+                            ForEach(Settings.supportedModels, id: \.self) { m in
+                                Text(Settings.modelLabels[m] ?? m).tag(m)
+                            }
+                        }
+                        Toggle("流式输出（边生成边打字，更快）", isOn: streamBinding)
+                    }
+                }
 
-                Text("\(promptBinding.wrappedValue.count) 字")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if editingTier == "fast" {
+                    Section {
+                        Text("极速档不经过 AI，识别完直接出字，零等待。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if editingTier != "fast" {
+                    Section {
+                        TextEditor(text: promptBinding)
+                            .font(.system(.body, design: .monospaced))
+                            .frame(minHeight: 180)
+                        HStack {
+                            Button("恢复默认提示词") { resetPrompt() }
+                                .buttonStyle(.link)
+                            Spacer()
+                            Text("\(promptBinding.wrappedValue.count) 字")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } header: {
+                        Text("提示词")
+                    } footer: {
+                        Text(tierPromptHint).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
+            .formStyle(.grouped)
         }
-        .padding(20)
+        .padding(.top, 12)
+        .padding(.horizontal, 12)
+    }
+
+    private var sttBinding: Binding<String> {
+        switch editingTier {
+        case "fast":   return $settings.sttFast
+        case "format": return $settings.sttFormat
+        default:        return $settings.sttPolish
+        }
+    }
+
+    private var modelBinding: Binding<String> {
+        editingTier == "format" ? $settings.modelFormat : $settings.modelPolish
+    }
+
+    private var streamBinding: Binding<Bool> {
+        editingTier == "format" ? $settings.streamFormat : $settings.streamPolish
     }
 
     private var promptBinding: Binding<String> {
-        switch editingPrompt {
+        switch editingTier {
         case "format":  return $settings.formatPrompt
         case "command": return $settings.commandPrompt
         default:         return $settings.systemPrompt
         }
     }
 
-    private var promptDescription: String {
-        switch editingPrompt {
+    private func resetPrompt() {
+        switch editingTier {
+        case "format":  settings.formatPrompt = Settings.defaultFormatPrompt
+        case "command": settings.commandPrompt = Settings.defaultCommandPrompt
+        default:         settings.systemPrompt = Settings.defaultPrompt
+        }
+    }
+
+    private var tierPromptHint: String {
+        switch editingTier {
         case "format":  return "格式档：清理口语并按体裁（邮件 / 汇报 / 纪要 / 待办）自动排版。"
-        case "command": return "命令模式：当宿主 App 中有选中文字时，口述指令来处理选中内容。"
+        case "command": return "命令模式：宿主 App 中有选中文字时，口述指令处理选中内容。"
         default:         return "润色档：清理语气词、结巴、语序，保留口语风格。"
         }
     }
@@ -470,7 +506,7 @@ struct SettingsView: View {
                 _ = try await DeepSeekService.cleanup(
                     text: "测试连接",
                     apiKey: settings.apiKey,
-                    model: settings.model,
+                    model: settings.modelPolish,
                     prompt: "回复 OK",
                     endpoint: settings.apiEndpoint
                 )

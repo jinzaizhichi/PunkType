@@ -10,21 +10,33 @@ final class Settings: ObservableObject {
 
     // DeepSeek (or any OpenAI-compatible chat endpoint)
     @AppStorage("apiKey") var apiKey: String = ""
-    @AppStorage("model") var model: String = "deepseek-v4-flash"
-    @AppStorage("heavyModel") var heavyModel: String = "deepseek-v4-pro"
     @AppStorage("apiEndpoint") var apiEndpoint: String = "https://api.deepseek.com/chat/completions"
+
+    // Model for command / translate (not a tier) + background term extraction
+    @AppStorage("heavyModel") var heavyModel: String = "deepseek-v4-pro"
 
     // Output tier: fast (raw transcription) / polish (cleanup) / format (cleanup + layout)
     @AppStorage("tier") var tier: String = "polish"
 
-    // Prompts
+    // MARK: Per-tier configuration (each tier is an editable preset)
+    // STT engine per tier: local | apple-fast | whisper
+    @AppStorage("stt_fast")   var sttFast: String = "local"
+    @AppStorage("stt_polish") var sttPolish: String = "local"
+    @AppStorage("stt_format") var sttFormat: String = "local"
+    // Cleanup model per tier (fast tier has no model)
+    @AppStorage("model_polish") var modelPolish: String = "deepseek-v4-flash"
+    @AppStorage("model_format") var modelFormat: String = "deepseek-v4-pro"
+    // Streaming output per tier (type into cursor as it generates)
+    @AppStorage("stream_polish") var streamPolish: Bool = false
+    @AppStorage("stream_format") var streamFormat: Bool = false
+
+    // Prompts (per tier)
     @AppStorage("systemPrompt") var systemPrompt: String = defaultPrompt
     @AppStorage("formatPrompt") var formatPrompt: String = defaultFormatPrompt
     @AppStorage("commandPrompt") var commandPrompt: String = defaultCommandPrompt
 
     // Speech recognition
     @AppStorage("language") var language: String = "zh-CN"
-    @AppStorage("sttEngine") var sttEngine: String = "local" // local | whisper
 
     // OpenAI (Whisper cloud transcription)
     @AppStorage("openaiKey") var openaiKey: String = ""
@@ -32,6 +44,24 @@ final class Settings: ObservableObject {
 
     // Personal dictionary glossary injection
     @AppStorage("injectGlossary") var injectGlossary: Bool = true
+
+    // MARK: - Per-tier accessors
+
+    func sttEngine(for tier: String) -> String {
+        switch tier {
+        case "fast":   return sttFast
+        case "format": return sttFormat
+        default:        return sttPolish
+        }
+    }
+
+    func model(for tier: String) -> String {
+        tier == "format" ? modelFormat : modelPolish
+    }
+
+    func stream(for tier: String) -> Bool {
+        tier == "format" ? streamFormat : streamPolish
+    }
 
     // Global hotkey preset
     @AppStorage("hotkey") var hotkey: String = "opt-space"

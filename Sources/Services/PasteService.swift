@@ -20,7 +20,7 @@ enum PasteService {
             print("[PunkType] ⚠️ Accessibility not granted — text left on clipboard")
             let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             AXIsProcessTrustedWithOptions(opts)
-            return "Copied — ⌘V"
+            return "已复制，按 ⌘V 粘贴"
         }
 
         let savedItems = savePasteboard(pb)
@@ -40,7 +40,7 @@ enum PasteService {
                     restorePasteboard(pb, items: savedItems)
                 }
             }
-            return "Pasted ✓"
+            return "已粘贴 ✓"
         }
 
         // All paste methods failed — leave our text on the clipboard for manual ⌘V

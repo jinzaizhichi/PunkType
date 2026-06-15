@@ -8,7 +8,7 @@ import Accelerate
 // stopRecording() waits for the recognizer's final result instead of
 // returning the last partial, so the tail of the last sentence is not lost.
 
-final class SpeechRecognizer: NSObject, SFSpeechRecognizerDelegate, @unchecked Sendable {
+final class SpeechRecognizer: NSObject, SFSpeechRecognizerDelegate, SpeechTranscribing, @unchecked Sendable {
     private let speechRecognizer: SFSpeechRecognizer
     private let audioEngine = AVAudioEngine()
     private let lock = NSLock()
@@ -23,9 +23,11 @@ final class SpeechRecognizer: NSObject, SFSpeechRecognizerDelegate, @unchecked S
     nonisolated(unsafe) private(set) var lastAudioURL: URL?
     nonisolated(unsafe) var onAudioLevel: (@Sendable (Float) -> Void)?
 
-    /// How long to wait for the recognizer's final result after stop before
-    /// falling back to the last partial.
-    private let finalResultTimeout: TimeInterval = 1.5
+    /// Max wait for the recognizer's final result after stop before falling
+    /// back to the last partial. We still deliver the instant `isFinal` arrives
+    /// (usually 200–500 ms for a short clip); this is only the safety cap, kept
+    /// short so a quick utterance isn't taxed by a long fixed wait.
+    private let finalResultTimeout: TimeInterval = 0.7
 
     init(locale: String = "zh-CN") {
         self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: locale))!

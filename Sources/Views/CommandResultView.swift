@@ -1,27 +1,29 @@
 import SwiftUI
 
-// MARK: - Command Result Panel
-// Shown after a command-mode request (selected text + spoken instruction).
-// The RESULT is the hero (large, multi-line, scrollable, selectable); the
-// spoken instruction is a small caption for context only.
-// Buttons: 替换原文 / 复制 / 关闭.
+// MARK: - Result Panel
+// A floating panel showing a text result with actions. Used in two cases:
+//  1. Command mode (selected text + spoken instruction) — paste = 替换原文
+//  2. Dictation with no editable cursor focused — paste = 插入到光标
+// The RESULT is the hero (large, multi-line, scrollable, selectable).
 
 struct CommandResultView: View {
-    let instruction: String
+    let title: String
+    let subtitle: String        // instruction or hint; empty hides the line
     let result: String
+    let pasteLabel: String      // "替换原文" or "插入到光标"
+    let onPaste: () -> Void
     let onCopy: () -> Void
-    let onReplace: () -> Void
     let onClose: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header — instruction as a small caption, result label, close
+            // Header
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("处理结果")
+                    Text(title)
                         .font(.system(size: 13, weight: .semibold))
-                    if !instruction.isEmpty {
-                        Text("指令：\(instruction)")
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
@@ -57,10 +59,10 @@ struct CommandResultView: View {
 
             // Actions
             HStack(spacing: 10) {
-                Button(action: onReplace) {
-                    Label("替换原文", systemImage: "arrow.uturn.backward")
+                Button(action: onPaste) {
+                    Label(pasteLabel, systemImage: "text.insert")
                 }
-                .help("用结果替换你选中的内容（仅在可编辑处有效）")
+                .help("把结果放到当前光标处（先点回输入框）")
 
                 Spacer()
 

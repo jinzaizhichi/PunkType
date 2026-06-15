@@ -31,7 +31,7 @@ struct PunkTypeApp: App {
                 Button(action: { appDelegate.toggleRecording() }) {
                     HStack {
                         Image(systemName: appDelegate.isRecording ? "stop.circle" : "mic.circle")
-                        Text(appDelegate.isRecording ? "Stop Recording" : "Start Recording (\(settings.hotkeyPreset.label))")
+                        Text(appDelegate.isRecording ? "停止录音" : "开始录音（\(settings.hotkeyPreset.label)）")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -71,7 +71,7 @@ struct PunkTypeApp: App {
                     }) {
                         HStack {
                             Image(systemName: "doc.on.clipboard")
-                            Text("Copy Last Result")
+                            Text("复制上次结果")
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -84,7 +84,7 @@ struct PunkTypeApp: App {
                 if !historyManager.entries.isEmpty {
                     Divider()
 
-                    Text("History")
+                    Text("历史")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 8)
@@ -113,7 +113,7 @@ struct PunkTypeApp: App {
                     }
 
                     if historyManager.entries.count > 5 {
-                        Text("+ \(historyManager.entries.count - 5) more — open Settings → History")
+                        Text("还有 \(historyManager.entries.count - 5) 条 — 在「设置 → 历史」查看")
                             .font(.system(size: 9))
                             .foregroundColor(.secondary)
                             .padding(.horizontal, 8)
@@ -125,7 +125,7 @@ struct PunkTypeApp: App {
                 Button(action: { appDelegate.openSettings() }) {
                     HStack {
                         Image(systemName: "gear")
-                        Text("Settings...")
+                        Text("设置…")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -139,7 +139,7 @@ struct PunkTypeApp: App {
                 Button(action: { NSApplication.shared.terminate(nil) }) {
                     HStack {
                         Image(systemName: "power")
-                        Text("Quit")
+                        Text("退出")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -163,16 +163,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var settingsWindow: NSWindow?
     private var overlayPanel: NSPanel?
 
+    /// Drives the floating overlay independently of the (localizable) status text.
+    enum OverlayPhase { case hidden, listening, processing, done }
+
     @Published var isRecording = false
-    @Published var statusText = "Ready"
+    @Published var statusText = "准备就绪"
+    @Published var overlayPhase: OverlayPhase = .hidden
     @Published var lastResult: String = ""
     @Published var audioLevel: Float = 0
+
+    /// Frontmost app PID captured when recording started — used to detect
+    /// whether the user switched away before the result was ready.
+    private var recordingFrontmostPID: pid_t?
 
     /// Selected text captured when recording started → command mode
     private var commandTarget: String?
 
     let settings = Settings.shared
-    let speechRecognizer = SpeechRecognizer()
+    private(set) var speechRecognizer: any SpeechTranscribing = SpeechRecognizer(locale: Settings.shared.language)
+    private var activeEngineKey = ""
+
+    /// (Re)build the speech engine for the active tier's STT choice.
+    /// "apple-fast" → SpeechAnalyzer; "local"/"whisper" → SFSpeech (which also
+    /// writes the WAV that the Whisper upload path needs).
+    private func ensureRecognizer() {
+        let engine = settings.sttEngine(for: settings.tier)
+        let useModern = engine == "apple-fast"
+        let key = "\(useModern)|\(settings.language)"
+        guard key != activeEngineKey else { return }
+        activeEngineKey = key
+        if useModern, #available(macOS 26.0, *) {
+            speechRecognizer = ModernSpeechRecognizer(localeIdentifier: settings.language)
+            print("[PunkType] 🎙️ Engine: SpeechAnalyzer (\(settings.language))")
+        } else {
+            speechRecognizer = SpeechRecognizer(locale: settings.language)
+            print("[PunkType] 🎙️ Engine: SFSpeechRecognizer (\(settings.language))")
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupHotkeyHandler()
@@ -279,26 +306,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private var commandPanel: NSPanel?
 
-    /// Show the command-mode result in a floating, non-activating panel so the
-    /// host app keeps focus (so 替换原文 can paste back into it).
+    /// Command-mode result → panel where paste means "替换原文".
     private func showCommandResult(instruction: String, result: String) {
+        showResultPanel(
+            title: "处理结果",
+            subtitle: instruction.isEmpty ? "" : "指令：\(instruction)",
+            result: result,
+            pasteLabel: "替换原文"
+        )
+    }
+
+    /// Show a text result in a floating, non-activating panel so the host app
+    /// keeps focus (so the paste button can land in it after you click back).
+    private func showResultPanel(title: String, subtitle: String, result: String, pasteLabel: String) {
         closeCommandResult()
 
         let view = CommandResultView(
-            instruction: instruction,
+            title: title,
+            subtitle: subtitle,
             result: result,
-            onCopy: { [weak self] in
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(result, forType: .string)
-                self?.statusText = "已复制"
-                self?.closeCommandResult()
-            },
-            onReplace: { [weak self] in
+            pasteLabel: pasteLabel,
+            onPaste: { [weak self] in
                 self?.closeCommandResult()
                 // Give focus a beat to settle back on the host field, then paste
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     _ = PasteService.copyAndPaste(result)
                 }
+            },
+            onCopy: { [weak self] in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(result, forType: .string)
+                self?.statusText = "已复制"
+                self?.closeCommandResult()
             },
             onClose: { [weak self] in
                 self?.closeCommandResult()
@@ -360,15 +399,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return
         }
 
+        ensureRecognizer()
+
+        // Remember where we started so we can tell if the user switches away.
+        recordingFrontmostPID = FocusService.frontmostPID()
+
         // Command mode: text selected in the host app → speak an instruction
         commandTarget = settings.isConfigured ? SelectionService.selectedText() : nil
 
         isRecording = true
+        overlayPhase = .listening
         if let target = commandTarget {
             let preview = String(target.prefix(10))
             statusText = "已选中「\(preview)\(target.count > 10 ? "…" : "")」说出指令"
         } else {
-            statusText = "Listening..."
+            statusText = "聆听中…"
         }
         showOverlay()
 
@@ -383,7 +428,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             try speechRecognizer.startRecording()
         } catch {
             isRecording = false
-            statusText = "Error"
+            overlayPhase = .hidden
+            statusText = "出错了"
             overlayPanel?.orderOut(nil)
             showAlert(message: error.localizedDescription)
         }
@@ -391,7 +437,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func stopRecording() {
         isRecording = false
-        statusText = "AI Thinking..."
+        overlayPhase = .processing
+        statusText = "AI 处理中…"
 
         speechRecognizer.stopRecording { @Sendable [weak self] rawText in
             Task { @MainActor in
@@ -406,14 +453,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private func handleTranscription(localText: String) async {
         var text = localText
 
-        // 格式档自动升级 Whisper；引擎选 whisper 时优先 Whisper；本机为空时兜底
-        let preferWhisper = settings.sttEngine == "whisper"
-            || (settings.tier == "format" && commandTarget == nil)
+        // 当前档选了 Whisper 时优先用 Whisper；本机识别为空时也兜底 Whisper
+        let preferWhisper = settings.sttEngine(for: settings.tier) == "whisper"
         if settings.hasOpenAIKey,
            preferWhisper || text.isEmpty,
            let audioURL = speechRecognizer.lastAudioURL,
            FileManager.default.fileExists(atPath: audioURL.path) {
-            statusText = "Transcribing..."
+            statusText = "转写中…"
             do {
                 let whisperText = try await OpenAIService.transcribe(
                     audioURL: audioURL,
@@ -428,20 +474,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
 
-        guard !text.isEmpty else {
-            statusText = "No speech detected"
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            statusText = "未检测到语音"
+            overlayPhase = .hidden
             overlayPanel?.orderOut(nil)
             commandTarget = nil
             return
         }
 
-        await processAndPaste(text)
+        await processAndPaste(trimmed)
     }
 
     // MARK: - Tier pipeline + Paste
 
     private func processAndPaste(_ rawText: String) async {
-        statusText = "AI Thinking..."
+        statusText = "AI 处理中…"
         let dictionary = DictionaryStore.shared
         let target = commandTarget
         commandTarget = nil
@@ -467,8 +515,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                     endpoint: settings.apiEndpoint
                 )
                 self.lastResult = result
+                overlayPhase = .hidden
                 overlayPanel?.orderOut(nil)
-                statusText = "Ready"
+                statusText = "准备就绪"
                 showCommandResult(instruction: rawText, result: result)
                 HistoryManager.shared.add(
                     cleanedText: result,
@@ -480,10 +529,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 }
             } catch {
                 print("[PunkType] ❌ Command failed: \(error.localizedDescription)")
-                statusText = "Command failed"
+                overlayPhase = .hidden
+                statusText = "命令失败"
                 hideOverlay(after: 1.0)
             }
             return
+        }
+
+        // Streaming path (per-tier): type the cleaned text into the cursor as it
+        // streams, for lower perceived latency. Only when there's a confident
+        // paste target up front; otherwise fall through to the normal path.
+        if settings.stream(for: settings.tier), settings.tier != "fast", settings.isConfigured {
+            let switchedAway = recordingFrontmostPID == nil
+                || FocusService.frontmostPID() != recordingFrontmostPID
+            let canType = !switchedAway && FocusService.editableFocusState() != .nonEditable
+            if canType, await streamAndType(rawText, dictionary: dictionary) {
+                return
+            }
         }
 
         // Normal dictation: 极速 / 润色 / 格式 → auto-paste at cursor
@@ -496,29 +558,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 if settings.injectGlossary, let glossary = dictionary.correctionGlossary {
                     prompt += glossary
                 }
+                let m = settings.model(for: "format")
                 output = try await DeepSeekService.cleanup(
                     text: rawText,
                     apiKey: settings.apiKey,
-                    model: settings.heavyModel,
+                    model: m,
                     prompt: prompt,
                     endpoint: settings.apiEndpoint,
                     maxTokens: 2048,
                     timeout: 30
                 )
-                usedModel = settings.heavyModel
+                usedModel = m
             default: // polish
                 var prompt = settings.systemPrompt
                 if settings.injectGlossary, let glossary = dictionary.correctionGlossary {
                     prompt += glossary
                 }
+                let m = settings.model(for: "polish")
                 output = try await DeepSeekService.cleanup(
                     text: rawText,
                     apiKey: settings.apiKey,
-                    model: settings.model,
+                    model: m,
                     prompt: prompt,
                     endpoint: settings.apiEndpoint
                 )
-                usedModel = settings.model
+                usedModel = m
             }
         } catch {
             // 清理失败 → 退回原始转写
@@ -528,36 +592,111 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
 
         self.lastResult = output
-        let pasteStatus = PasteService.copyAndPaste(output)
-        print("[PunkType] 📋 \(pasteStatus): \(output.prefix(50))...")
-        self.statusText = pasteStatus
 
-        // Save to history
+        // Save to history regardless of where the text lands
         HistoryManager.shared.add(
             cleanedText: output,
             rawText: rawText,
             model: usedModel
         )
-
         // 异步抽词入库（不阻塞出字）
         if settings.injectGlossary, settings.isConfigured {
             extractTermsInBackground(from: output)
         }
 
+        // Decide: paste at the cursor, or show the result in a panel?
+        // Pop the panel only when we're confident there's nowhere to paste:
+        //   • the user switched to a different app/desktop, OR
+        //   • the same app reports focus on a clearly non-text control.
+        // Otherwise (editable, or can't tell) → paste.
+        let switchedAway = recordingFrontmostPID == nil
+            || FocusService.frontmostPID() != recordingFrontmostPID
+        let noTextHere = FocusService.editableFocusState() == .nonEditable
+        guard !switchedAway && !noTextHere else {
+            print("[PunkType] 📋 No paste target (switchedAway=\(switchedAway), noTextHere=\(noTextHere)) — showing panel")
+            overlayPhase = .hidden
+            overlayPanel?.orderOut(nil)
+            statusText = "准备就绪"
+            showResultPanel(
+                title: "转写结果（未找到输入框）",
+                subtitle: "点回输入框后可「插入到光标」，或直接复制",
+                result: output,
+                pasteLabel: "插入到光标"
+            )
+            return
+        }
+
+        let pasteStatus = PasteService.copyAndPaste(output)
+        print("[PunkType] 📋 \(pasteStatus): \(output.prefix(50))...")
+        self.statusText = pasteStatus
+        self.overlayPhase = .done
+
         // Auto-dismiss overlay
         hideOverlay(after: 1.5)
 
         try? await Task.sleep(nanoseconds: 2_000_000_000)
-        if self.statusText.hasPrefix("Pasted") || self.statusText.hasPrefix("Copied") {
-            self.statusText = "Ready"
+        if self.overlayPhase == .done {
+            self.statusText = "准备就绪"
+            self.overlayPhase = .hidden
         }
+    }
+
+    /// Stream the cleaned text and type it at the cursor as tokens arrive.
+    /// Returns true if it handled output; false if it should fall back to the
+    /// normal (non-streaming) path (e.g. failed before any token).
+    private func streamAndType(_ rawText: String, dictionary: DictionaryStore) async -> Bool {
+        let isFormat = settings.tier == "format"
+        var prompt = isFormat ? settings.formatPrompt : settings.systemPrompt
+        if settings.injectGlossary, let glossary = dictionary.correctionGlossary {
+            prompt += glossary
+        }
+        let model = settings.model(for: settings.tier)
+
+        statusText = "AI 处理中…"
+        var typed = ""
+        do {
+            let stream = DeepSeekService.streamCleanup(
+                text: rawText,
+                apiKey: settings.apiKey,
+                model: model,
+                prompt: prompt,
+                endpoint: settings.apiEndpoint,
+                maxTokens: isFormat ? 2048 : 1024
+            )
+            for try await delta in stream {
+                if typed.isEmpty {
+                    // First token arrived — clear the overlay so typing is visible
+                    overlayPhase = .hidden
+                    overlayPanel?.orderOut(nil)
+                }
+                typed += delta
+                TypeService.insert(delta)
+            }
+        } catch {
+            print("[PunkType] ⚠️ Streaming failed after \(typed.count) chars: \(error.localizedDescription)")
+            if typed.isEmpty { return false } // nothing typed → safe to fall back
+        }
+
+        guard !typed.isEmpty else { return false }
+
+        let output = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.lastResult = output
+        self.statusText = "已粘贴 ✓"
+        HistoryManager.shared.add(cleanedText: output, rawText: rawText, model: model)
+        if settings.injectGlossary {
+            extractTermsInBackground(from: output)
+        }
+
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        if self.statusText == "已粘贴 ✓" { self.statusText = "准备就绪" }
+        return true
     }
 
     // MARK: - Dictionary post-processing
 
     private func extractTermsInBackground(from text: String) {
         let apiKey = settings.apiKey
-        let model = settings.model
+        let model = settings.modelPolish // background extraction uses the light model
         let endpoint = settings.apiEndpoint
         Task {
             do {
