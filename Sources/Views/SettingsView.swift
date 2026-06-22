@@ -6,7 +6,6 @@ import ServiceManagement
 struct SettingsView: View {
     @EnvironmentObject var appDelegate: AppDelegate
     @ObservedObject var settings = Settings.shared
-    @ObservedObject var historyManager = HistoryManager.shared
     @ObservedObject var dictionary = DictionaryStore.shared
     @ObservedObject var styleStore = StyleProfileStore.shared
     @ObservedObject var notebook = NotebookStore.shared
@@ -16,6 +15,12 @@ struct SettingsView: View {
     @State private var testResult: String?
     @State private var isTesting = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+
+    /// Read from the app bundle so the About page always matches the real build
+    /// (single source of truth = Info.plist in build-app.sh).
+    static var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+    }
 
     var body: some View {
         TabView {
@@ -30,9 +35,6 @@ struct SettingsView: View {
 
             personalizeTab
                 .tabItem { Label("个性化", systemImage: "person.crop.circle") }
-
-            historyTab
-                .tabItem { Label("历史", systemImage: "clock.arrow.circlepath") }
 
             aboutTab
                 .tabItem { Label("关于", systemImage: "info.circle") }
@@ -110,10 +112,15 @@ struct SettingsView: View {
                         Text(lang.name).tag(lang.code)
                     }
                 }
+                Picker("翻译目标语言", selection: $settings.translateTarget) {
+                    ForEach(Settings.translateTargets, id: \.self) { lang in
+                        Text(lang).tag(lang)
+                    }
+                }
             } header: {
                 Text("通用")
             } footer: {
-                Text("命令 / 翻译模型用于「选中文字命令」。识别语言对所有档位生效。")
+                Text("命令 / 翻译模型用于「选中命令」「翻译」「询问」。识别语言对所有档位生效。\n动作快捷键：⌥⌘T 翻译、⌥⌘A 询问、⌥⌘N 记事本。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -477,80 +484,6 @@ struct SettingsView: View {
         .padding(20)
     }
 
-    // MARK: - 历史
-
-    private var historyTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("历史记录")
-                    .font(.headline)
-                Spacer()
-                Text("\(historyManager.entries.count) / 100")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if !historyManager.entries.isEmpty {
-                    Button("清空") { historyManager.clearAll() }
-                        .buttonStyle(.link)
-                        .font(.caption)
-                }
-            }
-
-            if historyManager.entries.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.secondary)
-                    Text("还没有历史记录")
-                        .foregroundStyle(.secondary)
-                    Text("你处理过的文字会显示在这里。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List {
-                    ForEach(historyManager.entries) { entry in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(entry.timeAgo)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                Text(entry.model)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1)
-                                    .background(Color.secondary.opacity(0.12))
-                                    .cornerRadius(4)
-                                Button(action: {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(entry.cleanedText, forType: .string)
-                                }) {
-                                    Image(systemName: "doc.on.doc").font(.caption)
-                                }
-                                .buttonStyle(.borderless)
-                                .help("复制")
-                                Button(action: { historyManager.remove(entry) }) {
-                                    Image(systemName: "trash").font(.caption).foregroundStyle(.red)
-                                }
-                                .buttonStyle(.borderless)
-                                .help("删除")
-                            }
-                            Text(entry.cleanedText)
-                                .font(.system(size: 12))
-                                .textSelection(.enabled)
-                                .lineLimit(4)
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-                .listStyle(.inset(alternatesRowBackgrounds: true))
-            }
-        }
-        .padding(20)
-    }
-
     // MARK: - 关于
 
     private var aboutTab: some View {
@@ -568,7 +501,7 @@ struct SettingsView: View {
             Text("说人话，出成品。")
                 .foregroundStyle(.secondary)
 
-            Text("版本 1.3.0")
+            Text("版本 \(Self.appVersion)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

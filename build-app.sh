@@ -52,11 +52,11 @@ cat > "$CONTENTS/Info.plist" << 'PLIST'
     <key>CFBundleName</key>
     <string>PunkType</string>
     <key>CFBundleIdentifier</key>
-    <string>com.punk2898.punktype</string>
+    <string>com.nexorainfinite.punktype</string>
     <key>CFBundleVersion</key>
-    <string>4</string>
+    <string>5</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.3.0</string>
+    <string>1.4.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
@@ -80,12 +80,27 @@ PLIST
 # Create PkgInfo
 echo -n "APPL????" > "$CONTENTS/PkgInfo"
 
-# Code sign: prefer a stable Apple Development identity so TCC permissions
-# (Accessibility/Microphone) survive rebuilds; fall back to ad-hoc.
-IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/{print $2; exit}')
+# Code sign. Preference order:
+#   1. PUNKTYPE_SIGN_IDENTITY env override (exact identity name)
+#   2. Developer ID Application — stable identity for distributing to others,
+#      survives rebuilds (TCC permissions persist), notarizable.
+#   3. Apple Development — stable for local dev.
+#   4. ad-hoc fallback.
+LIST=$(security find-identity -v -p codesigning 2>/dev/null)
+if [ -n "${PUNKTYPE_SIGN_IDENTITY:-}" ]; then
+    IDENTITY="$PUNKTYPE_SIGN_IDENTITY"
+else
+    IDENTITY=$(echo "$LIST" | awk -F'"' '/Developer ID Application/{print $2; exit}')
+    [ -z "$IDENTITY" ] && IDENTITY=$(echo "$LIST" | awk -F'"' '/Apple Development/{print $2; exit}')
+fi
+ENTITLEMENTS="$PROJECT_DIR/Resources/PunkType.entitlements"
 if [ -n "$IDENTITY" ]; then
     echo "🔏 Signing with: $IDENTITY"
-    codesign --force --sign "$IDENTITY" "$APP_BUNDLE"
+    # Hardened runtime + entitlements + secure timestamp → notarization-ready.
+    # The audio-input entitlement keeps the mic working under hardened runtime.
+    codesign --force --options runtime --timestamp \
+        --entitlements "$ENTITLEMENTS" \
+        --sign "$IDENTITY" "$APP_BUNDLE"
 else
     echo "🔏 Signing ad-hoc (permissions will reset on each reinstall)"
     codesign --force --sign - "$APP_BUNDLE" 2>/dev/null

@@ -62,6 +62,13 @@ final class Settings: ObservableObject {
     // Notebook: passively record every dictation into a local日报-able notebook
     @AppStorage("notebookEnabled") var notebookEnabled: Bool = true
 
+    // First-run onboarding (permission walkthrough) shown once
+    @AppStorage("hasOnboarded") var hasOnboarded: Bool = false
+
+    // Translate action target language (default 中文 → 英语)
+    @AppStorage("translateTarget") var translateTarget: String = "英语"
+    static let translateTargets = ["英语", "中文", "日语", "韩语", "法语", "西班牙语", "德语", "俄语"]
+
     // MARK: - Per-tier accessors
 
     func sttEngine(for tier: String) -> String {
@@ -81,7 +88,7 @@ final class Settings: ObservableObject {
     }
 
     // Global hotkey preset
-    @AppStorage("hotkey") var hotkey: String = "fn"
+    @AppStorage("hotkey") var hotkey: String = "opt-space"
 
     var isConfigured: Bool {
         !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
