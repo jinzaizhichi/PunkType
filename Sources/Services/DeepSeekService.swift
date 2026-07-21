@@ -15,6 +15,34 @@ enum DeepSeekService {
         return URLSession(configuration: cfg)
     }()
 
+    // MARK: - Network diagnostics
+
+    /// Captures URLSession's own network-stack breakdown (DNS / TCP / TLS /
+    /// time-to-first-byte / proxy / connection reuse) so a slow request can be
+    /// attributed to a layer instead of guessed at.
+    private final class NetMetricsLogger: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        didFinishCollecting metrics: URLSessionTaskMetrics) {
+            guard DiagnosticLog.enabled, let t = metrics.transactionMetrics.last else { return }
+            func gap(_ a: Date?, _ b: Date?) -> String {
+                guard let a, let b else { return "-" }
+                return String(Int(b.timeIntervalSince(a) * 1000))
+            }
+            DiagnosticLog.log(
+                "NET dns=\(gap(t.domainLookupStartDate, t.domainLookupEndDate))ms "
+                + "tcp=\(gap(t.connectStartDate, t.connectEndDate))ms "
+                + "tls=\(gap(t.secureConnectionStartDate, t.secureConnectionEndDate))ms "
+                + "ttfb=\(gap(t.requestEndDate, t.responseStartDate))ms "
+                + "复用连接=\(t.isReusedConnection) 走代理=\(t.isProxyConnection) "
+                + "协议=\(t.networkProtocolName ?? "?") "
+                + "总计=\(gap(t.fetchStartDate, t.responseEndDate))ms"
+            )
+        }
+    }
+    private static let metricsLogger = NetMetricsLogger()
+
+    private static func msSince(_ t: Date) -> Int { Int(Date().timeIntervalSince(t) * 1000) }
+
     struct ChatRequest: Encodable {
         let model: String
         let messages: [Message]
@@ -141,6 +169,7 @@ enum DeepSeekService {
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                let t0 = Date()
                 do {
                     guard let url = URL(string: endpoint) else { throw URLError(.badURL) }
 
@@ -156,6 +185,13 @@ enum DeepSeekService {
                         thinking: thinkingConfig(disable: disableThinking, endpoint: endpoint)
                     )
 
+                    // Config context — makes machine-to-machine differences
+                    // (model / endpoint / thinking actually disabled?) visible.
+                    DiagnosticLog.log(
+                        "REQ ⓪开始 model=\(model) endpoint=\(url.host ?? endpoint) "
+                        + "关思考=\(body.thinking != nil) 输入=\(text.count)字"
+                    )
+
                     var request = URLRequest(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -164,12 +200,14 @@ enum DeepSeekService {
                     request.httpBody = try JSONEncoder().encode(body)
                     request.timeoutInterval = timeout
 
-                    let (bytes, response) = try await session.bytes(for: request)
+                    let (bytes, response) = try await session.bytes(for: request, delegate: metricsLogger)
+                    // Phase A: connection + request sent + response headers back.
+                    // Slow here → DNS / TCP / TLS / proxy / server accept.
+                    DiagnosticLog.log("REQ ①响应头 +\(msSince(t0))ms")
+
                     // Critical: release the underlying connection when we stop
                     // reading (we break early on [DONE]). Without this the data
-                    // task lingers and connections leak, so over a long session
-                    // new requests queue behind stuck sockets and get slower and
-                    // slower until they time out — until the app is restarted.
+                    // task lingers and connections leak.
                     defer { bytes.task.cancel() }
 
                     guard let http = response as? HTTPURLResponse else {
@@ -183,18 +221,45 @@ enum DeepSeekService {
                         )
                     }
 
+                    var lineCount = 0
+                    var sawFirstLine = false
+                    var sawReasoning = false
+                    var sawFirstContent = false
+
                     for try await line in bytes.lines {
+                        lineCount += 1
+                        if !sawFirstLine {
+                            sawFirstLine = true
+                            // Phase B: first SSE line of any kind (incl. keep-alive).
+                            // Headers fast but this slow → server is holding the stream.
+                            DiagnosticLog.log("REQ ②首行SSE +\(msSince(t0))ms")
+                        }
                         guard line.hasPrefix("data:") else { continue }
                         let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                         if payload == "[DONE]" { break }
+                        // Reasoning deltas arrive as `reasoning_content`, which we
+                        // don't render — if these show up, the model is "thinking"
+                        // and that alone explains a late first visible token.
+                        if !sawReasoning, payload.contains("reasoning_content") {
+                            sawReasoning = true
+                            DiagnosticLog.log("REQ ⚠️检测到思考(reasoning_content) +\(msSince(t0))ms")
+                        }
                         guard let data = payload.data(using: .utf8),
                               let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data),
                               let delta = chunk.choices.first?.delta.content,
                               !delta.isEmpty else { continue }
+                        if !sawFirstContent {
+                            sawFirstContent = true
+                            // Phase C: first real text. Gap from ② → here = model
+                            // thinking / server queuing.
+                            DiagnosticLog.log("REQ ③首个正文 +\(msSince(t0))ms (此前 \(lineCount) 行, 思考=\(sawReasoning))")
+                        }
                         continuation.yield(delta)
                     }
+                    DiagnosticLog.log("REQ ④结束 +\(msSince(t0))ms (共 \(lineCount) 行)")
                     continuation.finish()
                 } catch {
+                    DiagnosticLog.log("REQ ❌出错 +\(msSince(t0))ms: \(error.localizedDescription)")
                     continuation.finish(throwing: error)
                 }
             }

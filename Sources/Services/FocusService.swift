@@ -25,11 +25,16 @@ enum FocusService {
         NSWorkspace.shared.frontmostApplication?.processIdentifier
     }
 
-    @MainActor
-    static func editableFocusState() -> FocusState {
+    /// NOTE: `nonisolated` on purpose — these are SYNCHRONOUS cross-process
+    /// Accessibility queries that block until the *target* app replies. On the
+    /// main thread a busy/slow target (飞书 / Electron) could freeze the whole
+    /// app for tens of seconds. Callers run this off the main thread, and we
+    /// also cap the AX messaging timeout so a single call can't hang.
+    nonisolated static func editableFocusState() -> FocusState {
         guard AXIsProcessTrusted() else { return .unknown }
 
         let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 1.0)
         var focusedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             systemWide,
@@ -40,6 +45,7 @@ enum FocusService {
         }
 
         let element = focusedRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(element, 1.0)
 
         // Editable signals
         var roleRef: CFTypeRef?

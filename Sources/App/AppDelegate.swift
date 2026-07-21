@@ -122,6 +122,17 @@ struct PunkTypeApp: App {
 
                 Divider()
 
+                Button(action: { appDelegate.toggleRecording(action: .command) }) {
+                    HStack {
+                        Image(systemName: "text.cursor")
+                        Text("对选中文字下指令（⌥⌘S）")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+
                 Button(action: { appDelegate.toggleRecording(action: .translate) }) {
                     HStack {
                         Image(systemName: "globe")
@@ -207,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var notebookHotKeyRef: EventHotKeyRef?
     private var translateHotKeyRef: EventHotKeyRef?
     private var askHotKeyRef: EventHotKeyRef?
+    private var commandHotKeyRef: EventHotKeyRef?
     private var settingsWindow: NSWindow?
     private var notebookWindow: NSWindow?
     private var onboardingWindow: NSWindow?
@@ -241,13 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         return Int(Date().timeIntervalSince(t) * 1000)
     }
 
-    /// Selected text captured when recording started → command mode
+    /// Selected text captured when the command action (⌥⌘S) started recording.
     private var commandTarget: String?
-    /// The last selection we processed as a command. A command-mode result is
-    /// shown in a panel and the selection lingers in the source app, so without
-    /// this guard the *same* selection would turn every later dictation into a
-    /// command. We only enter command mode on a selection different from this.
-    private var lastCommandTarget: String?
 
     let settings = Settings.shared
     private(set) var speechRecognizer: any SpeechTranscribing = SpeechRecognizer(locale: Settings.shared.language)
@@ -319,6 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                     case 2: delegate.openNotebook()
                     case 3: delegate.toggleRecording(action: .translate)
                     case 4: delegate.toggleRecording(action: .ask)
+                    case 5: delegate.toggleRecording(action: .command)
                     default: delegate.toggleRecording(action: .dictate)
                     }
                 }
@@ -331,7 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         )
 
         // Fixed action hotkeys (independent of the main trigger):
-        //   ⌥⌘N notebook · ⌥⌘T translate · ⌥⌘A ask
+        //   ⌥⌘N notebook · ⌥⌘T translate · ⌥⌘A ask · ⌥⌘S command-on-selection
         let sig: OSType = 0x70756E6B
         RegisterEventHotKey(UInt32(kVK_ANSI_N), UInt32(optionKey | cmdKey),
                             EventHotKeyID(signature: sig, id: 2), GetApplicationEventTarget(), 0, &notebookHotKeyRef)
@@ -339,6 +347,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                             EventHotKeyID(signature: sig, id: 3), GetApplicationEventTarget(), 0, &translateHotKeyRef)
         RegisterEventHotKey(UInt32(kVK_ANSI_A), UInt32(optionKey | cmdKey),
                             EventHotKeyID(signature: sig, id: 4), GetApplicationEventTarget(), 0, &askHotKeyRef)
+        RegisterEventHotKey(UInt32(kVK_ANSI_S), UInt32(optionKey | cmdKey),
+                            EventHotKeyID(signature: sig, id: 5), GetApplicationEventTarget(), 0, &commandHotKeyRef)
     }
 
     /// (Re)register the global hotkey from the current settings preset.
@@ -553,7 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     // MARK: - Recording
 
     /// What the current recording will do once transcribed.
-    enum DictationAction { case dictate, translate, ask }
+    enum DictationAction { case dictate, command, translate, ask }
     private var currentAction: DictationAction = .dictate
 
     func toggleRecording(action: DictationAction = .dictate) {
@@ -580,19 +590,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         recordingFrontmostPID = FocusService.frontmostPID()
         recordingAppContext = AppContextService.current(forPID: recordingFrontmostPID)
 
-        // Command mode: a *new* selection in the host app → speak an instruction.
-        // Only for plain dictation — translate/ask ignore any selection.
-        // A selection identical to the last one we processed is treated as
-        // normal dictation (it's just lingering), so dictation never gets stuck
-        // in the heavy command path.
-        let selection = (currentAction == .dictate && settings.isConfigured)
-            ? SelectionService.selectedText() : nil
-        if let selection, selection != lastCommandTarget {
+        // Selection is read ONLY for the explicit command action (⌥⌘S). Plain
+        // dictation never touches it, so ⌥Space starts instantly and can never
+        // be turned into a slow command by a lingering selection.
+        if currentAction == .command {
+            guard let selection = SelectionService.selectedText() else {
+                statusText = "未选中文字"
+                showAlert(message: "命令模式需要先在 App 里选中一段文字，再按 ⌥⌘S。")
+                return
+            }
             commandTarget = selection
-            lastCommandTarget = selection
         } else {
             commandTarget = nil
-            if selection == nil { lastCommandTarget = nil }
         }
 
         isRecording = true
@@ -600,13 +609,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         switch currentAction {
         case .translate: statusText = "聆听中…（翻译成\(settings.translateTarget)）"
         case .ask:       statusText = "聆听中…（提问）"
+        case .command:
+            let t = commandTarget ?? ""
+            let preview = String(t.prefix(10))
+            statusText = "已选中「\(preview)\(t.count > 10 ? "…" : "")」说出指令"
         case .dictate:
-            if let target = commandTarget {
-                let preview = String(target.prefix(10))
-                statusText = "已选中「\(preview)\(target.count > 10 ? "…" : "")」说出指令"
-            } else {
-                statusText = "聆听中…"
-            }
+            statusText = "聆听中…"
         }
         showOverlay()
 
@@ -687,9 +695,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
 
         switch currentAction {
-        case .dictate:   await processAndPaste(trimmed)
-        case .translate: await processTranslate(trimmed)
-        case .ask:       await processAsk(trimmed)
+        case .dictate, .command: await processAndPaste(trimmed)
+        case .translate:         await processTranslate(trimmed)
+        case .ask:               await processAsk(trimmed)
         }
     }
 
@@ -781,7 +789,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if settings.stream(for: settings.tier), settings.tier != "fast", settings.isConfigured {
             let switchedAway = recordingFrontmostPID == nil
                 || FocusService.frontmostPID() != recordingFrontmostPID
-            let canType = !switchedAway && FocusService.editableFocusState() != .nonEditable
+            let canType = switchedAway ? false : !(await focusIsNonEditable())
             if canType {
                 if await streamAndType(rawText, dictionary: dictionary) { return }
             } else {
@@ -849,7 +857,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Otherwise (editable, or can't tell) → paste.
         let switchedAway = recordingFrontmostPID == nil
             || FocusService.frontmostPID() != recordingFrontmostPID
-        let noTextHere = FocusService.editableFocusState() == .nonEditable
+        let noTextHere = await focusIsNonEditable()
         guard !switchedAway && !noTextHere else {
             print("[PunkType] 📋 No paste target (switchedAway=\(switchedAway), noTextHere=\(noTextHere)) — showing panel")
             overlayPhase = .hidden
@@ -943,7 +951,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 apiKey: settings.apiKey, model: settings.heavyModel, endpoint: settings.apiEndpoint
             )
             lastResult = output
-            deliverOrPanel(output, panelTitle: "翻译（\(settings.translateTarget)）", panelSubtitle: "原文：\(rawText)")
+            await deliverOrPanel(output, panelTitle: "翻译（\(settings.translateTarget)）", panelSubtitle: "原文：\(rawText)")
         } catch {
             print("[PunkType] ❌ Translate failed: \(error.localizedDescription)")
             overlayPhase = .hidden; overlayPanel?.orderOut(nil)
@@ -969,12 +977,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    /// Run the (synchronous, cross-process) AX focus query OFF the main thread
+    /// so a slow/busy target app can never freeze the UI. The AX call is also
+    /// capped to ~1s via AXUIElementSetMessagingTimeout inside FocusService.
+    private func focusIsNonEditable() async -> Bool {
+        await Task.detached(priority: .userInitiated) {
+            FocusService.editableFocusState() == .nonEditable
+        }.value
+    }
+
     /// Paste at the cursor if we're confident there's a target; otherwise show
     /// the result in a panel. Shared by translate (and other insert actions).
-    private func deliverOrPanel(_ output: String, panelTitle: String, panelSubtitle: String) {
+    private func deliverOrPanel(_ output: String, panelTitle: String, panelSubtitle: String) async {
         let switchedAway = recordingFrontmostPID == nil
             || FocusService.frontmostPID() != recordingFrontmostPID
-        let noTextHere = FocusService.editableFocusState() == .nonEditable
+        let noTextHere = await focusIsNonEditable()
         guard !switchedAway && !noTextHere else {
             overlayPhase = .hidden; overlayPanel?.orderOut(nil); statusText = "准备就绪"
             showResultPanel(title: panelTitle, subtitle: panelSubtitle, result: output, pasteLabel: "插入到光标")

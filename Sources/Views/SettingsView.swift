@@ -75,7 +75,7 @@ struct SettingsView: View {
             } header: {
                 Text("触发")
             } footer: {
-                Text("按一下快捷键开始录音，再按一下停止。选中文字时按快捷键会进入命令模式。" +
+                Text("按一下快捷键开始录音，再按一下停止。这个键只做听写；要对选中文字下指令，请用 ⌥⌘S。" +
                      (settings.hotkey == "fn"
                       ? "\n\n用 🌐 Fn 键时，若按 Fn 会弹出表情或听写，请到「系统设置 → 键盘 →『按下 🌐 键时』」改为「无操作」。"
                       : ""))
@@ -120,7 +120,7 @@ struct SettingsView: View {
             } header: {
                 Text("通用")
             } footer: {
-                Text("命令 / 翻译模型用于「选中命令」「翻译」「询问」。识别语言对所有档位生效。\n动作快捷键：⌥⌘T 翻译、⌥⌘A 询问、⌥⌘N 记事本。")
+                Text("命令 / 翻译模型用于「选中命令」「翻译」「询问」。识别语言对所有档位生效。\n动作快捷键：⌥⌘S 对选中文字下指令、⌥⌘T 翻译、⌥⌘A 询问、⌥⌘N 记事本。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
