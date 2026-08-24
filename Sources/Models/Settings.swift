@@ -59,9 +59,6 @@ final class Settings: ObservableObject {
     // Diagnostic timing log (opt-in, for tracing rare hangs)
     @AppStorage("diagnostics") var diagnostics: Bool = false
 
-    // Notebook: passively record every dictation into a local日报-able notebook
-    @AppStorage("notebookEnabled") var notebookEnabled: Bool = true
-
     // First-run onboarding (permission walkthrough) shown once
     @AppStorage("hasOnboarded") var hasOnboarded: Bool = false
 
@@ -187,16 +184,16 @@ final class Settings: ObservableObject {
     static let supportedModels = [
         "deepseek-v4-flash",
         "deepseek-v4-pro",
-        "gpt-4o-mini",
-        "gpt-4o",
-        "claude-3-haiku",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
     ]
 
     static let modelLabels: [String: String] = [
         "deepseek-v4-flash": "DeepSeek V4 Flash (最快)",
         "deepseek-v4-pro": "DeepSeek V4 Pro (最强)",
-        "gpt-4o-mini": "GPT-4o Mini",
-        "gpt-4o": "GPT-4o",
-        "claude-3-haiku": "Claude 3 Haiku",
+        "gpt-5.6-luna": "GPT-5.6 Luna (高性价比)",
+        "gpt-5.6-terra": "GPT-5.6 Terra (均衡)",
+        "gpt-5.6-sol": "GPT-5.6 Sol (旗舰)",
     ]
 }

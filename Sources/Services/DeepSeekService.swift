@@ -43,6 +43,17 @@ enum DeepSeekService {
 
     private static func msSince(_ t: Date) -> Int { Int(Date().timeIntervalSince(t) * 1000) }
 
+    /// Thread-safe timestamp, updated when real content arrives; the watchdog
+    /// reads it to detect "server is stalling (only keep-alive, no content)".
+    private final class Heartbeat: @unchecked Sendable {
+        private let lock = NSLock()
+        private var last = Date()
+        func touch() { lock.lock(); last = Date(); lock.unlock() }
+        func idle() -> TimeInterval { lock.lock(); defer { lock.unlock() }; return Date().timeIntervalSince(last) }
+    }
+
+    struct ContentStall: Error {}
+
     struct ChatRequest: Encodable {
         let model: String
         let messages: [Message]
@@ -165,11 +176,13 @@ enum DeepSeekService {
         endpoint: String,
         maxTokens: Int = 1024,
         timeout: TimeInterval = 20,
+        contentTimeout: TimeInterval = 5,
         disableThinking: Bool = true
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 let t0 = Date()
+                var sawFirstContent = false // visible in catch for stall detection
                 do {
                     guard let url = URL(string: endpoint) else { throw URLError(.badURL) }
 
@@ -221,10 +234,27 @@ enum DeepSeekService {
                         )
                     }
 
+                    // Content watchdog: the server can hold the stream open with
+                    // keep-alive lines for minutes without sending real content
+                    // (never tripping the byte-idle timeout). If no *content*
+                    // arrives within contentTimeout, abort so the caller can retry
+                    // a fresh (usually healthy) slot instead of waiting forever.
+                    let heartbeat = Heartbeat()
+                    let watchdog = Task {
+                        while !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            if heartbeat.idle() > contentTimeout {
+                                DiagnosticLog.log("REQ ⏱内容看门狗触发(+\(msSince(t0))ms 无正文) → 掐断")
+                                bytes.task.cancel()
+                                break
+                            }
+                        }
+                    }
+                    defer { watchdog.cancel() }
+
                     var lineCount = 0
                     var sawFirstLine = false
                     var sawReasoning = false
-                    var sawFirstContent = false
 
                     for try await line in bytes.lines {
                         lineCount += 1
@@ -240,9 +270,15 @@ enum DeepSeekService {
                         // Reasoning deltas arrive as `reasoning_content`, which we
                         // don't render — if these show up, the model is "thinking"
                         // and that alone explains a late first visible token.
-                        if !sawReasoning, payload.contains("reasoning_content") {
-                            sawReasoning = true
-                            DiagnosticLog.log("REQ ⚠️检测到思考(reasoning_content) +\(msSince(t0))ms")
+                        if payload.contains("reasoning_content") {
+                            // Thinking output counts as progress → don't abort a
+                            // model that's legitimately reasoning; the watchdog
+                            // fires only on true silence (keep-alive, no deltas).
+                            heartbeat.touch()
+                            if !sawReasoning {
+                                sawReasoning = true
+                                DiagnosticLog.log("REQ ⚠️检测到思考(reasoning_content) +\(msSince(t0))ms")
+                            }
                         }
                         guard let data = payload.data(using: .utf8),
                               let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data),
@@ -254,13 +290,21 @@ enum DeepSeekService {
                             // thinking / server queuing.
                             DiagnosticLog.log("REQ ③首个正文 +\(msSince(t0))ms (此前 \(lineCount) 行, 思考=\(sawReasoning))")
                         }
+                        heartbeat.touch() // real content → reset the stall watchdog
                         continuation.yield(delta)
                     }
                     DiagnosticLog.log("REQ ④结束 +\(msSince(t0))ms (共 \(lineCount) 行)")
                     continuation.finish()
                 } catch {
-                    DiagnosticLog.log("REQ ❌出错 +\(msSince(t0))ms: \(error.localizedDescription)")
-                    continuation.finish(throwing: error)
+                    // If the watchdog aborted before any content, surface a
+                    // distinct stall error so the caller can retry a fresh slot.
+                    if !sawFirstContent {
+                        DiagnosticLog.log("REQ ❌内容停滞 +\(msSince(t0))ms")
+                        continuation.finish(throwing: ContentStall())
+                    } else {
+                        DiagnosticLog.log("REQ ❌出错 +\(msSince(t0))ms: \(error.localizedDescription)")
+                        continuation.finish(throwing: error)
+                    }
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -354,12 +398,14 @@ enum DeepSeekService {
     // MARK: - Style profile update (async post-processing)
 
     private static let stylePrompt = """
-    你在维护一份"用户表达风格画像"，用于让语音转写的整理更贴合用户本人的表达习惯。
+    你在维护一份"用户表达风格画像"，它的唯一目的：让 AI 整理语音转写时，输出更贴合用户本人、且更流畅清晰自然。
     请根据用户最新的一段文字，对已有画像做增量更新。要求：
     1. 用中文，不超过 150 字
-    2. 概括这些维度：语气、句子长短、常用口头禅/高频词、标点习惯、中英文混用程度、对人的称呼习惯、正式或随意倾向
-    3. 是"增量微调"：在已有画像基础上小步修正，保持稳定，不要因为一段文字就推翻重写
-    4. 只输出更新后的画像本身，不要任何解释或前后缀
+    2. 只提炼"值得保留、能让表达更好"的正面风格：整体语气与正式/随意倾向、句子长短偏好、常用的专业词汇/术语口径、标点与分段习惯、中英文混用程度、对人的称呼习惯
+    3. 【严禁学习】脏话/粗俗用语、语气词与口头禅（嗯、啊、那个、就是）、结巴与重复、说了一半又改口的碎片、离题啰嗦——这些是整理时本就要去掉的，绝不能写进画像
+    4. 画像描述的是用户"表达好的时候"的样子，是要模仿的正面范本，不是记录坏习惯
+    5. 是"增量微调"：在已有画像基础上小步修正，保持稳定，不要因为一段文字就推翻重写
+    6. 只输出更新后的画像本身，不要任何解释或前后缀
     """
 
     // MARK: - Translate action
@@ -402,52 +448,6 @@ enum DeepSeekService {
             system: system, user: question, apiKey: apiKey, model: model,
             endpoint: endpoint, maxTokens: 2048, timeout: 40
         )
-    }
-
-    // MARK: - Notebook daily summary
-
-    private static let dailySummaryPrompt = """
-    你是用户的工作日志助手。下面是用户某一天通过语音输入产生的若干条内容（按时间顺序）。
-    请汇总成一份当天的「日报」。要求：
-    1. 用中文
-    2. 严格输出 JSON，格式：{"title": "一句话标题", "body": "markdown 正文"}
-    3. title：一句话概括这一天（不超过 20 字）
-    4. body 用 markdown，包含这几节（没有内容的节可省略）：
-       **做了什么**（分点）、**重要**（分点）、**不重要**（分点）、**思考 / 待办**（分点）
-    5. 只根据给定内容，不要编造
-    6. 只输出 JSON，不要任何额外文字或代码块标记
-    """
-
-    struct DailyReport: Decodable { let title: String; let body: String }
-
-    /// Generate a daily report from a day's dictation entries.
-    static func dailySummary(
-        entriesText: String,
-        apiKey: String,
-        model: String,
-        endpoint: String
-    ) async throws -> DailyReport {
-        let raw = try await chat(
-            system: dailySummaryPrompt,
-            user: entriesText,
-            apiKey: apiKey,
-            model: model,
-            endpoint: endpoint,
-            maxTokens: 1024,
-            timeout: 30
-        )
-        // Strip accidental ```json fences, then decode.
-        var json = raw
-        if let r = json.range(of: "{"), let r2 = json.range(of: "}", options: .backwards) {
-            json = String(json[r.lowerBound...r2.lowerBound])
-        }
-        if let data = json.data(using: .utf8),
-           let report = try? JSONDecoder().decode(DailyReport.self, from: data) {
-            return report
-        }
-        // Fallback: use the first line as title, the rest as body.
-        let lines = raw.split(separator: "\n", maxSplits: 1).map(String.init)
-        return DailyReport(title: lines.first ?? "今日记录", body: lines.count > 1 ? lines[1] : raw)
     }
 
     /// Incrementally update the user's style profile from a new sample.

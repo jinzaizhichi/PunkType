@@ -113,7 +113,7 @@ struct PunkTypeApp: App {
                     }
 
                     if historyManager.entries.count > 5 {
-                        Text("更多记录在记事本（⌥⌘N）")
+                        Text("更多记录在「设置 → 历史」")
                             .font(.system(size: 9))
                             .foregroundColor(.secondary)
                             .padding(.horizontal, 8)
@@ -148,17 +148,6 @@ struct PunkTypeApp: App {
                     HStack {
                         Image(systemName: "questionmark.bubble")
                         Text("询问（⌥⌘A）")
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-
-                Button(action: { appDelegate.openNotebook() }) {
-                    HStack {
-                        Image(systemName: "book.closed")
-                        Text("记事本（⌥⌘N）")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -215,12 +204,10 @@ struct PunkTypeApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var hotKeyRef: EventHotKeyRef?
-    private var notebookHotKeyRef: EventHotKeyRef?
     private var translateHotKeyRef: EventHotKeyRef?
     private var askHotKeyRef: EventHotKeyRef?
     private var commandHotKeyRef: EventHotKeyRef?
     private var settingsWindow: NSWindow?
-    private var notebookWindow: NSWindow?
     private var onboardingWindow: NSWindow?
     private var overlayPanel: NSPanel?
 
@@ -283,13 +270,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         setupHotkeyHandler()
         registerHotkey()
 
-        // On launch, backfill daily reports for past days that don't have one
-        // yet (so yesterday's report is ready the next morning). Delayed so it
-        // doesn't slow startup; never touches today (still in progress).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            self?.autoGenerateMissingReports()
-        }
-
         // First run → show the permission onboarding instead of a bare prompt.
         if !settings.hasOnboarded {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -323,7 +303,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 let id = hkID.id
                 Task { @MainActor in
                     switch id {
-                    case 2: delegate.openNotebook()
                     case 3: delegate.toggleRecording(action: .translate)
                     case 4: delegate.toggleRecording(action: .ask)
                     case 5: delegate.toggleRecording(action: .command)
@@ -339,10 +318,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         )
 
         // Fixed action hotkeys (independent of the main trigger):
-        //   ⌥⌘N notebook · ⌥⌘T translate · ⌥⌘A ask · ⌥⌘S command-on-selection
+        //   ⌥⌘T translate · ⌥⌘A ask · ⌥⌘S command-on-selection
         let sig: OSType = 0x70756E6B
-        RegisterEventHotKey(UInt32(kVK_ANSI_N), UInt32(optionKey | cmdKey),
-                            EventHotKeyID(signature: sig, id: 2), GetApplicationEventTarget(), 0, &notebookHotKeyRef)
         RegisterEventHotKey(UInt32(kVK_ANSI_T), UInt32(optionKey | cmdKey),
                             EventHotKeyID(signature: sig, id: 3), GetApplicationEventTarget(), 0, &translateHotKeyRef)
         RegisterEventHotKey(UInt32(kVK_ANSI_A), UInt32(optionKey | cmdKey),
@@ -848,7 +825,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             extractTermsInBackground(from: output)
         }
         updateStyleInBackground(from: output)
-        recordToNotebook(output)
 
         // Decide: paste at the cursor, or show the result in a panel?
         // Pop the panel only when we're confident there's nowhere to paste:
@@ -897,30 +873,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         statusText = "AI 处理中…"
         var typed = ""
-        do {
-            let stream = DeepSeekService.streamCleanup(
-                text: rawText,
-                apiKey: settings.apiKey,
-                model: model,
-                prompt: prompt,
-                endpoint: settings.apiEndpoint,
-                maxTokens: isFormat ? 2048 : 1024
-            )
-            for try await delta in stream {
-                if typed.isEmpty {
-                    // First token arrived — clear the overlay so typing is visible
-                    overlayPhase = .hidden
-                    overlayPanel?.orderOut(nil)
-                    DiagnosticLog.log("流式 首字 +\(ms(since: sttStopTime))ms")
+
+        // Up to 2 attempts: if the server stalls (no content within the watchdog
+        // window) before any token is typed, retry a fresh slot once. Never retry
+        // after we've already started typing (would duplicate text).
+        for attempt in 1...2 {
+            do {
+                let stream = DeepSeekService.streamCleanup(
+                    text: rawText,
+                    apiKey: settings.apiKey,
+                    model: model,
+                    prompt: prompt,
+                    endpoint: settings.apiEndpoint,
+                    maxTokens: isFormat ? 2048 : 1024
+                )
+                for try await delta in stream {
+                    if typed.isEmpty {
+                        overlayPhase = .hidden
+                        overlayPanel?.orderOut(nil)
+                        DiagnosticLog.log("流式 首字 +\(ms(since: sttStopTime))ms")
+                    }
+                    typed += delta
+                    TypeService.insert(delta)
                 }
-                typed += delta
-                TypeService.insert(delta)
+                DiagnosticLog.log("流式 完成 +\(ms(since: sttStopTime))ms (\(typed.count)字)")
+                break
+            } catch {
+                DiagnosticLog.log("流式 出错 +\(ms(since: sttStopTime))ms (已出\(typed.count)字, 第\(attempt)次): \(error.localizedDescription)")
+                if !typed.isEmpty { break }          // already typing → don't retry
+                if attempt == 1 {
+                    statusText = "AI 响应慢，重试…"     // stalled before any token → retry once
+                    continue
+                }
+                return false                          // both attempts failed → fall back
             }
-            DiagnosticLog.log("流式 完成 +\(ms(since: sttStopTime))ms (\(typed.count)字)")
-        } catch {
-            print("[PunkType] ⚠️ Streaming failed after \(typed.count) chars: \(error.localizedDescription)")
-            DiagnosticLog.log("流式 出错 +\(ms(since: sttStopTime))ms (已出\(typed.count)字): \(error.localizedDescription)")
-            if typed.isEmpty { return false } // nothing typed → safe to fall back
         }
 
         guard !typed.isEmpty else { return false }
@@ -933,7 +919,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             extractTermsInBackground(from: output)
         }
         updateStyleInBackground(from: output)
-        recordToNotebook(output)
 
         try? await Task.sleep(nanoseconds: 1_200_000_000)
         if self.statusText == "已粘贴 ✓" { self.statusText = "准备就绪" }
@@ -1055,80 +1040,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
-    // MARK: - Notebook
-
-    /// Record a dictation output into the notebook (unless disabled / app excluded).
-    private func recordToNotebook(_ text: String) {
-        guard settings.notebookEnabled else { return }
-        NotebookStore.shared.record(
-            text: text,
-            app: recordingAppContext?.appName ?? "未知应用",
-            bundleID: recordingAppContext?.bundleID ?? "",
-            tier: settings.tier
-        )
-    }
-
-    /// Generate (or regenerate) the daily report for a day, then call back.
-    func generateDailyReport(day: String, entriesText: String, completion: @escaping @MainActor () -> Void) {
-        let apiKey = settings.apiKey
-        let model = settings.modelPolish
-        let endpoint = settings.apiEndpoint
-        guard settings.isConfigured else { completion(); return }
-        Task {
-            defer { Task { @MainActor in completion() } }
-            do {
-                let report = try await DeepSeekService.dailySummary(
-                    entriesText: entriesText, apiKey: apiKey, model: model, endpoint: endpoint
-                )
-                await MainActor.run {
-                    NotebookStore.shared.setSummary(day: day, DailySummary(
-                        title: report.title, body: report.body, generatedAt: Date()
-                    ))
-                }
-            } catch {
-                print("[PunkType] ⚠️ Daily report failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// Generate reports for past days (not today) that have entries but no
-    /// summary yet. Capped to the most recent few to avoid an API burst.
-    func autoGenerateMissingReports() {
-        guard settings.notebookEnabled, settings.isConfigured else { return }
-        let store = NotebookStore.shared
-        let today = NotebookStore.dayKey(Date())
-        let candidates = store.availableDates
-            .filter { $0 != today }
-            .prefix(7)
-            .filter { day in
-                guard let note = store.loadDay(day) else { return false }
-                return note.summary == nil && !note.entries.isEmpty
-            }
-        guard !candidates.isEmpty else { return }
-
-        let apiKey = settings.apiKey, model = settings.modelPolish, endpoint = settings.apiEndpoint
-        Task {
-            for day in candidates {
-                guard let note = store.loadDay(day) else { continue }
-                let text = note.entries
-                    .map { "\($0.timeLabel) [\($0.sourceApp)] \($0.text)" }
-                    .joined(separator: "\n")
-                do {
-                    let report = try await DeepSeekService.dailySummary(
-                        entriesText: text, apiKey: apiKey, model: model, endpoint: endpoint
-                    )
-                    await MainActor.run {
-                        store.setSummary(day: day, DailySummary(
-                            title: report.title, body: report.body, generatedAt: Date()
-                        ))
-                    }
-                } catch {
-                    print("[PunkType] ⚠️ Auto report failed for \(day): \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-
     func openOnboarding() {
         if let window = onboardingWindow {
             window.makeKeyAndOrderFront(nil)
@@ -1147,23 +1058,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         onboardingWindow = window
-    }
-
-    func openNotebook() {
-        if let window = notebookWindow {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let view = NotebookView(appDelegate: self)
-        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
-        window.title = "PunkType 记事本"
-        window.setContentSize(NSSize(width: 760, height: 520))
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        notebookWindow = window
     }
 
     // MARK: - Settings Window
