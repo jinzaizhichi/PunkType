@@ -26,7 +26,7 @@ final class Settings: ObservableObject {
     @AppStorage("stt_polish") var sttPolish: String = "apple-fast"
     @AppStorage("stt_format") var sttFormat: String = "apple-fast"
     // Cleanup model per tier (fast tier has no model)
-    @AppStorage("model_polish") var modelPolish: String = "deepseek-v4-flash"
+    @AppStorage("model_polish") var modelPolish: String = "deepseek-flash"
     @AppStorage("model_format") var modelFormat: String = "deepseek-v4-pro"
     // Streaming output per tier (type into cursor as it generates)
     @AppStorage("stream_polish") var streamPolish: Bool = true
@@ -182,7 +182,7 @@ final class Settings: ObservableObject {
     ]
 
     static let supportedModels = [
-        "deepseek-v4-flash",
+        "deepseek-flash",
         "deepseek-v4-pro",
         "gpt-5.6-luna",
         "gpt-5.6-terra",
@@ -190,10 +190,24 @@ final class Settings: ObservableObject {
     ]
 
     static let modelLabels: [String: String] = [
-        "deepseek-v4-flash": "DeepSeek V4 Flash (最快)",
+        "deepseek-flash": "DeepSeek V4.1 Flash (快 + 高质量)",
         "deepseek-v4-pro": "DeepSeek V4 Pro (最强)",
         "gpt-5.6-luna": "GPT-5.6 Luna (高性价比)",
         "gpt-5.6-terra": "GPT-5.6 Terra (均衡)",
         "gpt-5.6-sol": "GPT-5.6 Sol (旗舰)",
     ]
+
+    /// One-time migration of retired model IDs stored in UserDefaults.
+    /// DeepSeek retired `deepseek-v4-flash` and made `deepseek-flash` the
+    /// canonical name for V4.1 Flash (the old ID still routes, but the picker
+    /// would show blank for a value not in `supportedModels`). Rewrite any
+    /// stored tier model so the UI stays consistent.
+    private init() {
+        let d = UserDefaults.standard
+        for key in ["model_polish", "model_format", "heavyModel"] {
+            if d.string(forKey: key) == "deepseek-v4-flash" {
+                d.set("deepseek-flash", forKey: key)
+            }
+        }
+    }
 }

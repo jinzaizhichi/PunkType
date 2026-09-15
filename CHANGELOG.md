@@ -4,6 +4,16 @@
 
 ---
 
+## [1.4.4] — 2026-09-15
+
+### ✨ 变化
+
+- **支持 DeepSeek V4.1 Flash**（2026-09-10 发布，又快又强：552B MoE、1M 上下文、原生多模态）。新增模型 `deepseek-flash`，并设为**润色档默认**。
+  - 官方已把旧的 `deepseek-v4-flash` 退役、规范名改为 `deepseek-flash`；本版做了一次性迁移，老配置里的旧 ID 会自动改写成新 ID（否则设置里的模型下拉会显示空白）。
+  - 说明：DeepSeek 侧目前也把 `deepseek-v4-pro` 的请求路由到 V4.1 Flash 计费，本版暂保留 Pro 选项不变。
+
+---
+
 ## [1.4.3] — 2026-08-20
 
 ### 🐛 修复（重要）
@@ -166,6 +176,7 @@
 - 全局快捷键预设、开机自启
 - 中英双语 README，匿名签名的下载包
 
+[1.4.4]: https://github.com/punk2898/PunkType/releases/tag/v1.4.4
 [1.4.3]: https://github.com/punk2898/PunkType/releases/tag/v1.4.3
 [1.4.2]: https://github.com/punk2898/PunkType/releases/tag/v1.4.2
 [1.4.1]: https://github.com/punk2898/PunkType/releases/tag/v1.4.1

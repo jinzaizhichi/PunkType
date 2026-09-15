@@ -54,9 +54,9 @@ cat > "$CONTENTS/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.nexorainfinite.punktype</string>
     <key>CFBundleVersion</key>
-    <string>8</string>
+    <string>9</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.4.3</string>
+    <string>1.4.4</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
